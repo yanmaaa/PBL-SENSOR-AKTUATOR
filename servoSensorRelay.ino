@@ -26,9 +26,13 @@ const unsigned long LOCK_TIME = 10000;
 const unsigned long MIN_PUMP_TIME = 3000;
 
 // Scan variables
-int currentAngle = 180;
+int currentAngle = 200;
 int scanDirection = -1;
 int scanStep = 1;
+
+// Variabel BARU untuk track status api
+bool flameDetectedNow = false;
+bool flameWasDetected = false;
 
 void setup() {
   Serial.begin(9600);
@@ -37,7 +41,7 @@ void setup() {
   pinMode(relayPin, OUTPUT);
   
   // Matikan pompa di awal
-  digitalWrite(relayPin, LOW); // HIGH = POMPA MATI
+  digitalWrite(relayPin, LOW); // LOW = POMPA MATI (sesuaikan dengan relay Anda)
   
   myServo.write(currentAngle);
   
@@ -67,7 +71,7 @@ void scanMode(unsigned long currentMillis) {
         scanDirection = 1;
       }
     } else {
-      if (currentAngle < 180) {
+      if (currentAngle < 200) {
         currentAngle += scanStep;
       } else {
         scanDirection = -1;
@@ -93,11 +97,12 @@ void scanMode(unsigned long currentMillis) {
       Serial.println(flameValue);
     }
     
-    // Deteksi api
+    // Deteksi api - PERBAIKAN DI SINI
     if (flameValue < FLAME_THRESHOLD) {
       lockedAngle = currentAngle;
       isLocked = true;
       lockStartTime = currentMillis;
+      flameDetectedNow = true;  // API TERDETEKSI
       
       Serial.print("!!! FIRE DETECTED !!! Angle: ");
       Serial.print(lockedAngle);
@@ -106,8 +111,8 @@ void scanMode(unsigned long currentMillis) {
       
       myServo.write(lockedAngle);
       
-      // NYALAKAN POMPA
-      turnPumpOff();
+      // NYALAKAN POMPA - PERBAIKAN DI SINI
+      turnPumpOn();  // Ubah dari turnPumpOff() menjadi turnPumpOn()
     }
   }
 }
@@ -116,16 +121,39 @@ void fireFightingMode(unsigned long currentMillis) {
   // 1. Lock servo di posisi api
   myServo.write(lockedAngle);
   
-  // 2. Baca sensor
+  // 2. Baca sensor dan update status api
   if (currentMillis - previousSensorTime >= SENSOR_INTERVAL) {
     previousSensorTime = currentMillis;
     flameValue = analogRead(flameSensorPin);
+    
+    // PERBAIKAN PENTING: Cek status api saat ini
+    flameWasDetected = flameDetectedNow;  // Simpan status sebelumnya
+    flameDetectedNow = (flameValue < FLAME_THRESHOLD);  // Update status sekarang
+    
+    // LOGIKA BARU: Matikan relay saat api hilang
+    if (flameWasDetected && !flameDetectedNow) {
+      // Api baru saja hilang
+      Serial.println("Flame disappeared! Turning pump OFF immediately.");
+      turnPumpOff();  // Langsung matikan pompa
+    }
+    
+    // Jika api muncul kembali
+    if (!flameWasDetected && flameDetectedNow) {
+      Serial.println("Flame reappeared! Turning pump ON.");
+      turnPumpOn();  // Nyalakan kembali pompa
+    }
   }
   
-  // 3. Kontrol pompa
-  controlPump(currentMillis);
+  // 3. Kontrol pompa - DIUPDATE
+  if (pumpOn && flameDetectedNow) {
+    // Pompa ON hanya jika ada api
+    digitalWrite(relayPin, HIGH); // Pompa ON (sesuaikan dengan relay)
+  } else {
+    // Pompa OFF jika tidak ada api
+    digitalWrite(relayPin, LOW); // Pompa OFF (sesuaikan dengan relay)
+  }
   
-  // 4. Cek status
+  // 4. Cek status - MODIFIKASI SEDIKIT
   static unsigned long lastStatus = 0;
   if (currentMillis - lastStatus >= 500) {
     lastStatus = currentMillis;
@@ -136,13 +164,15 @@ void fireFightingMode(unsigned long currentMillis) {
     Serial.print(lockedAngle);
     Serial.print("° | Flame: ");
     Serial.print(flameValue);
+    Serial.print(" | Status: ");
+    Serial.print(flameDetectedNow ? "FIRE" : "NO FIRE");
     Serial.print(" | Pump: ");
     Serial.print(pumpOn ? "ON" : "OFF");
     Serial.print(" | Time: ");
     Serial.print(lockDuration / 1000);
     Serial.println("s");
     
-    // Cek apakah api sudah padam
+    // LOGIKA BARU: Kembali scan jika api hilang cukup lama
     bool fireOut = checkIfFireOut();
     
     if (fireOut || lockDuration >= LOCK_TIME) {
@@ -152,38 +182,17 @@ void fireFightingMode(unsigned long currentMillis) {
         Serial.println("Maximum fight time reached");
       }
       
-      // Matikan pompa
-      turnPumpOn();
+      // Pastikan pompa mati
+      turnPumpOff();
       
       // Kembali ke scan mode
       isLocked = false;
       currentAngle = lockedAngle;
-      scanDirection = (currentAngle > 90) ? -1 : 1;
+      //scanDirection = (currentAngle > 90) ? -1 : 1;
+      flameDetectedNow = false; // Reset status api
       
       Serial.println("Returning to scan mode...");
-      delay(2000);
-    }
-  }
-}
-
-void controlPump(unsigned long currentMillis) {
-  if (pumpOn) {
-    unsigned long pumpDuration = currentMillis - pumpStartTime;
-    
-    // Jika api masih ada, pertahankan pompa
-    if (flameValue < FLAME_THRESHOLD) {
-      digitalWrite(relayPin, LOW); // Pompa ON
-    } 
-    // Jika api padam tapi pompa belum cukup lama menyala
-    else if (pumpDuration < MIN_PUMP_TIME) {
-      digitalWrite(relayPin, LOW); // Pompa tetap ON
-      Serial.print("Pump minimum time: ");
-      Serial.print((MIN_PUMP_TIME - pumpDuration) / 1000);
-      Serial.println("s remaining");
-    }
-    // Jika api padam dan pompa sudah cukup lama
-    else {
-      turnPumpOff();
+      delay(1000);
     }
   }
 }
@@ -192,7 +201,7 @@ void turnPumpOn() {
   if (!pumpOn) {
     pumpOn = true;
     pumpStartTime = millis();
-    digitalWrite(relayPin, LOW); // Pompa ON
+    digitalWrite(relayPin, HIGH); // Pompa ON (sesuaikan dengan relay)
     Serial.println("PUMP: ON - Water spraying!");
   }
 }
@@ -200,8 +209,8 @@ void turnPumpOn() {
 void turnPumpOff() {
   if (pumpOn) {
     pumpOn = false;
-    digitalWrite(relayPin, HIGH); // Pompa OFF
-    Serial.println("PUMP: OFF");
+    digitalWrite(relayPin, LOW); // Pompa OFF (sesuaikan dengan relay)
+    Serial.println("PUMP: OFF immediately (flame gone)");
   }
 }
 
@@ -211,7 +220,7 @@ bool checkIfFireOut() {
   const int SAFE_LIMIT = FLAME_THRESHOLD + 100;
   const int REQUIRED_SAFE = 5;
   
-  if (flameValue > SAFE_LIMIT) {
+  if (flameValue > SAFE_LIMIT && !flameDetectedNow) {
     safeCount++;
     if (safeCount >= REQUIRED_SAFE) {
       safeCount = 0;
