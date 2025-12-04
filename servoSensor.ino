@@ -1,155 +1,144 @@
 #include <Servo.h>
 
-// Pin Configuration
 const int flameSensorPin = A0;
 const int servoPin = 2;
-const int ledPin = 13;      // LED indicator
-
-// Servo Object
 Servo myServo;
 
 // Variables
 int flameValue;
-int bestAngle = 90;
-int bestValue = 1023;
-bool isSearching = true;
 bool isLocked = false;
-unsigned long lockStartTime = 0;
-const unsigned long LOCK_DURATION = 10000; // Lock selama 10 detik
-
-// Parameters
+int lockedAngle = 0;
 const int FLAME_THRESHOLD = 400;
-const int SCAN_SPEED = 20;  // ms per degree
+
+// Millis timing
+unsigned long previousMoveTime = 0;
+unsigned long previousSensorTime = 0;
+unsigned long lockStartTime = 0;
+
+// Speed control
+const unsigned long MOVE_INTERVAL = 50;    // Gerak setiap 50ms (LAMBAT - bisa diatur 30-100)
+const unsigned long SENSOR_INTERVAL = 100; // Baca sensor setiap 100ms
+const unsigned long LOCK_TIME = 10000;     // Lock 10 detik
+
+// Scan variables
+int currentAngle = 180;
+int scanDirection = -1; // -1 = turun, 1 = naik
+int scanStep = 1;       // Derajat per step (lebih kecil = lebih halus)
 
 void setup() {
   Serial.begin(9600);
-  
-  // Initialize pins
   myServo.attach(servoPin);
-  pinMode(ledPin, OUTPUT);
+  myServo.write(currentAngle);
   
-  // Start at center
-  myServo.write(90);
-  
-  Serial.println("=== SCAN & LOCK SYSTEM ===");
-  Serial.println("Mode: Scan -> Find -> Lock -> Hold");
-  Serial.println("==============================");
-  delay(1000);
+  Serial.println("=== SLOW SCAN INSTANT LOCK ===");
+  Serial.println("Speed: SLOW with millis()");
+  Serial.println("=============================");
 }
 
 void loop() {
-  if (isSearching) {
-    scanForFlame();
-  } else if (isLocked) {
-    holdLockPosition();
+  unsigned long currentMillis = millis();
+  
+  if (!isLocked) {
+    // Mode scanning
+    scanMode(currentMillis);
+  } else {
+    // Mode locked
+    lockMode(currentMillis);
   }
 }
 
-// Fungsi untuk scanning mencari api
-void scanForFlame() {
-  Serial.println("Scanning for flame...");
-  digitalWrite(ledPin, LOW);
-  
-  bestValue = 1023;  // Reset best value
-  bestAngle = 90;
-  
-  // Scan dari kiri ke kanan
-  for (int angle = 0; angle <= 180; angle += 2) {
-    myServo.write(angle);
-    delay(30); // Tunggu servo stabil
+void scanMode(unsigned long currentMillis) {
+  // 1. Gerakkan servo secara periodic (LAMBAT)
+  if (currentMillis - previousMoveTime >= MOVE_INTERVAL) {
+    previousMoveTime = currentMillis;
     
-    // Baca sensor
+    // Update posisi berdasarkan direction
+    if (scanDirection == -1) {
+      if (currentAngle > 0) {
+        currentAngle -= scanStep;
+      } else {
+        scanDirection = 1; // Ganti arah
+      }
+    } else {
+      if (currentAngle < 180) {
+        currentAngle += scanStep;
+      } else {
+        scanDirection = -1; // Ganti arah
+      }
+    }
+    
+    myServo.write(currentAngle);
+  }
+  
+  // 2. Baca sensor secara periodic
+  if (currentMillis - previousSensorTime >= SENSOR_INTERVAL) {
+    previousSensorTime = currentMillis;
+    
     flameValue = analogRead(flameSensorPin);
     
-    Serial.print("Angle: ");
-    Serial.print(angle);
-    Serial.print("° - Value: ");
-    Serial.println(flameValue);
-    
-    // Cek jika ada api
-    if (flameValue < FLAME_THRESHOLD && flameValue < bestValue) {
-      bestValue = flameValue;
-      bestAngle = angle;
+    // Print status (tidak terlalu sering)
+    static unsigned long lastPrint = 0;
+    if (currentMillis - lastPrint >= 1000) {
+      lastPrint = currentMillis;
+      Serial.print("Scanning: ");
+      Serial.print(currentAngle);
+      Serial.print("° | Flame: ");
+      Serial.println(flameValue);
     }
     
-    delay(SCAN_SPEED);
-  }
-  
-  // Cek apakah api ditemukan
-  if (bestValue < FLAME_THRESHOLD) {
-    Serial.print("Flame found at ");
-    Serial.print(bestAngle);
-    Serial.print("° with value ");
-    Serial.println(bestValue);
-    
-    // Lock ke posisi tersebut
-    lockToPosition(bestAngle);
-  } else {
-    Serial.println("No flame detected during scan.");
-    delay(1000);
+    // Cek api untuk instant lock
+    if (flameValue < FLAME_THRESHOLD) {
+      lockedAngle = currentAngle;
+      isLocked = true;
+      lockStartTime = currentMillis;
+      
+      Serial.print("!!! INSTANT LOCK !!! ");
+      Serial.print("Angle: ");
+      Serial.print(lockedAngle);
+      Serial.print("° | Value: ");
+      Serial.println(flameValue);
+      
+      // Hentikan scanning, langsung lock
+      myServo.write(lockedAngle);
+    }
   }
 }
 
-// Fungsi untuk lock ke posisi tertentu
-void lockToPosition(int angle) {
-  Serial.print("LOCKING to ");
-  Serial.print(angle);
-  Serial.println("°");
+void lockMode(unsigned long currentMillis) {
+  // Pertahankan posisi lock
+  myServo.write(lockedAngle);
   
-  // Pindah ke posisi api
-  myServo.write(angle);
-  delay(500);
-  
-  // Set status lock
-  isSearching = false;
-  isLocked = true;
-  lockStartTime = millis();
-  digitalWrite(ledPin, HIGH);
-  
-  // Konfirmasi lock
-  Serial.println("=== POSITION LOCKED ===");
-}
-
-// Fungsi untuk mempertahankan posisi lock
-void holdLockPosition() {
-  // Baca sensor di posisi terkunci
-  flameValue = analogRead(flameSensorPin);
-  
-  Serial.print("LOCKED at ");
-  Serial.print(bestAngle);
-  Serial.print("° | Flame: ");
-  Serial.print(flameValue);
-  
-  // Cek kondisi lock
-  unsigned long currentTime = millis();
-  unsigned long lockTime = currentTime - lockStartTime;
-  
-  // Cek apakah masih ada api
-  if (flameValue < FLAME_THRESHOLD) {
-    Serial.print(" | Flame OK");
+  // Cek sensor secara periodic
+  static unsigned long lastLockCheck = 0;
+  if (currentMillis - lastLockCheck >= 500) {
+    lastLockCheck = currentMillis;
     
-    // Tetap di posisi lock
-    myServo.write(bestAngle);
+    flameValue = analogRead(flameSensorPin);
     
-    // Cek apakah lock time sudah habis
-    if (lockTime >= LOCK_DURATION) {
-      Serial.println(" | Lock time expired, rescanning...");
+    // Hitung waktu lock
+    unsigned long lockDuration = currentMillis - lockStartTime;
+    
+    Serial.print("Locked: ");
+    Serial.print(lockedAngle);
+    Serial.print("° | Flame: ");
+    Serial.print(flameValue);
+    Serial.print(" | Time: ");
+    Serial.print(lockDuration / 1000);
+    Serial.println("s");
+    
+    // Cek apakah api masih ada atau waktu lock habis
+    if (flameValue >= FLAME_THRESHOLD || lockDuration >= LOCK_TIME) {
+      if (flameValue >= FLAME_THRESHOLD) {
+        Serial.println("Flame lost, unlocking...");
+      } else {
+        Serial.println("Lock time expired, unlocking...");
+      }
+      
       isLocked = false;
-      isSearching = true;
-      digitalWrite(ledPin, LOW);
-    } else {
-      Serial.print(" | Lock time: ");
-      Serial.print(LOCK_DURATION - lockTime);
-      Serial.println("ms remaining");
+      
+      // Lanjut scanning dari posisi terakhir
+      currentAngle = lockedAngle;
+      scanDirection = (currentAngle > 90) ? -1 : 1;
     }
-    
-  } else {
-    // Api hilang saat lock
-    Serial.println(" | Flame LOST! Rescanning...");
-    isLocked = false;
-    isSearching = true;
-    digitalWrite(ledPin, LOW);
   }
-  
-  delay(500);
 }
