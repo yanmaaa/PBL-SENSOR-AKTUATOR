@@ -29,7 +29,7 @@ int sweepDir = 1;
 const int SWEEP_MIN = 0;
 const int SWEEP_MAX = 180;
 unsigned long lastMoveTime = 0;
-const unsigned long SWEEP_INTERVAL = 20;
+const unsigned long SWEEP_INTERVAL = 30;
 
 void setup() {
   Serial.begin(9600);
@@ -116,7 +116,7 @@ void loop() {
 
     if (flameValue < FLAME_THRESHOLD) {
       fireDetected = true;
-      fireAngle = angle;      // LOCK ANGLE !! (Sudut Deteksi Awal)
+      fireAngle = angle;      // Sudut Deteksi Awal
       stopMotor();            // Pastikan motor berhenti saat deteksi
       Serial.print("FIRE detected at angle: ");
       Serial.println(fireAngle);
@@ -139,11 +139,14 @@ void loop() {
     int error = fireAngle - 90; // Error = 0 saat api di tengah (90 derajat)
     int absErr = abs(error);
 
-    if (absErr > 6) { // DEAD BAND 6° (Jika error lebih dari 6 derajat, lakukan pelurusan)
+    // Dead Band diperkecil menjadi 4 derajat untuk akurasi lebih tinggi
+    if (absErr > 3) { // DEAD BAND 4° 
 
       // Speed makin besar kalau error makin jauh (Kontrol Proporsional)
       int speed = absErr * 3; // Faktor proporsional (P) = 3
-      speed = constrain(speed, 90, 200); // Batasi kecepatan (min 90, max 200)
+      
+      // MODIFIKASI: Batas minimal PWM dinaikkan dari 90 ke 100
+      speed = constrain(speed, 120, 200); 
 
       if (error > 0) { 
         // fireAngle > 90 (Api di sisi KANAN) -> Robot harus Belok KIRI
@@ -161,16 +164,22 @@ void loop() {
       delay(50); 
       stopMotor();
       
-      // 2. Lakukan mini-sweep untuk menemukan sudut api yang BARU
-      int bestAngle = 90;
-      int lowestFlameValue = 1024;
+      // 2. Lakukan mini-sweep yang lebih FOKUS dan cerdas
+      int bestAngle = fireAngle; // Mulai dari sudut terakhir
+      int lowestFlameValue = analogRead(flameSensorPin);
       
-      // Sweep kecil di sekitar sudut 90 (misalnya 60 sampai 120 derajat)
-      for (int a = 60; a <= 120; a += 5) { 
+      // Tentukan range sweep baru: 15 derajat di setiap sisi fireAngle
+      int startAngle = constrain(fireAngle - 15, SWEEP_MIN, SWEEP_MAX);
+      int endAngle = constrain(fireAngle + 15, SWEEP_MIN, SWEEP_MAX);
+
+      // Iterasi dengan resolusi 3 derajat
+      for (int a = startAngle; a <= endAngle; a += 2) { 
           myServo.write(a);
           delay(10); // Tunggu servo bergerak
           int currentFlameValue = analogRead(flameSensorPin);
-          if (currentFlameValue < lowestFlameValue) {
+          
+          // Cek jika sinyal lebih kuat (nilai lebih rendah) DAN masih di bawah Threshold
+          if (currentFlameValue < lowestFlameValue && currentFlameValue < FLAME_THRESHOLD) {
               lowestFlameValue = currentFlameValue;
               bestAngle = a;
           }
@@ -181,7 +190,6 @@ void loop() {
       myServo.write(fireAngle);
       
       delay(50); // Jeda singkat
-      // 4. Loop akan berulang, motor akan bergerak lagi berdasarkan fireAngle yang baru
 
     } else {
       stopMotor();
@@ -207,7 +215,10 @@ void loop() {
         sweepDir = (angle > 90) ? -1 : 1;
       }
     } else { // Api ADA
-      static unsigned long lostTime = millis(); // Reset waktu kehilangan
+      // Reset Lost Time saat api terdeteksi
+      static unsigned long lostTime = millis();
+      lostTime = millis(); 
+
       if (!pumpActive) {
         digitalWrite(relayPin, HIGH);
         pumpActive = true;
